@@ -1,7 +1,7 @@
 /*
 ***************************************************************************
 **  Program  : webServerCompat.h
-**  Version  : v2.0.0-beta.72
+**  Version  : v2.0.0-beta.73
 **
 **  Copyright (c) 2021-2026 Robert van den Breemen
 **
@@ -371,7 +371,7 @@ inline void webSendPStream(int code, PGM_P contentType, PGM_P body) {
 // count as 503s. These helpers live beside the unchanged REST gate.
 bool webFileGateTryAdmit();
 void webFileGateRelease();
-bool webFileGateSafetyRefused();
+bool webFileGateCanSend(bool reserve);
 void webFileGateRejected();
 
 // ESPAsyncWebServer keeps ONE disconnect callback per request. Keep body cleanup
@@ -405,6 +405,7 @@ class WebQueuedFileResponse : public AsyncWebServerResponse {
   struct Queue {
     WebQueuedFileResponse* entries[4];
     uint8_t count;
+    bool pumping;
   };
   static Queue& queue() { static Queue pending = {}; return pending; }
   char _path[128];
@@ -412,14 +413,26 @@ class WebQueuedFileResponse : public AsyncWebServerResponse {
   uint32_t _queuedAt;
   bool _held;
   bool _gzip;
+  bool _deferred = false;
+  AsyncWebServerRequest* _request = nullptr; // Owned by the same live request; async_tcp only.
   AsyncWebServerResponse* _inner = nullptr;
 
+  static void observeDepth() {
+    state.heapdiag.iWebfilePending = queue().count;
+    if (queue().count > state.heapdiag.iWebfilePendingHwm)
+      state.heapdiag.iWebfilePendingHwm = queue().count;
+  }
+  void observeWait() {
+    const uint32_t elapsed = uint32_t(millis() - _queuedAt);
+    if (elapsed > state.heapdiag.iWebfileMaxWaitMs) state.heapdiag.iWebfileMaxWaitMs = elapsed;
+  }
   void dequeue() {
     Queue& pending = queue();
     for (uint8_t i = 0; i < pending.count; ++i) {
       if (pending.entries[i] != this) continue;
       for (uint8_t j = i + 1; j < pending.count; ++j) pending.entries[j - 1] = pending.entries[j];
       pending.entries[--pending.count] = nullptr;
+      observeDepth();
       break;
     }
   }
@@ -436,18 +449,22 @@ class WebQueuedFileResponse : public AsyncWebServerResponse {
     if (_inner) return true;
     _state = RESPONSE_FAILED;
     request->abort();
+    if (request->client()->pcb()) request->client()->abort(); // request.abort() is a no-op after _sent.
     return false;
   }
   void start(AsyncWebServerRequest* request) {
     if (!_held) {
       if (uint32_t(millis() - _queuedAt) >= 10000U) {
+        observeWait();
+        state.heapdiag.iWebfileTimeout++;
+        _deferred = false;
         webFileGateRejected();
         if (!error(request, 503)) return;
-      } else if (webFileGateSafetyRefused()) {
-        if (!error(request, 503)) return;
-      } else if (queue().entries[0] != this || !webFileGateTryAdmit()) {
+      } else if (queue().entries[0] != this || !webFileGateCanSend(true) || !webFileGateTryAdmit()) {
         return;
       } else {
+        observeWait();
+        if (_deferred) { state.heapdiag.iWebfileAdmitted++; _deferred = false; }
         dequeue();
         _held = true;
       }
@@ -475,16 +492,43 @@ class WebQueuedFileResponse : public AsyncWebServerResponse {
 public:
   static bool hasPending() { return queue().count != 0; }
   static bool queueFull() { return queue().count == 4; }
+  static uint16_t txHolding() {
+    PlatformTcpIdleConnection idle[4];
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < queue().count; ++i) {
+      AsyncWebServerRequest* request = queue().entries[i]->_request;
+      if (!request || !request->client()) continue;
+      idle[count++] = {request->client()->pcb(), request->client()};
+    }
+    return platformTcpTxHoldingOnPort(WEB_HTTP_PORT, idle, count);
+  }
+  static void pump() {
+    Queue& pending = queue();
+    if (pending.pumping) return;
+    pending.pumping = true;
+    for (uint8_t i = 0; i < 4 && pending.count; ++i) {
+      WebQueuedFileResponse* head = pending.entries[0];
+      if (!head->_request || !head->_request->client()->canSend()) break;
+      head->start(head->_request);
+      if (pending.count && pending.entries[0] == head) break;
+    }
+    pending.pumping = false;
+  }
   WebQueuedFileResponse(const char* path, const char* mime, bool gzip, bool admitted)
       : _queuedAt(millis()), _held(admitted), _gzip(gzip) {
     strlcpy(_path, path, sizeof(_path));
     strlcpy(_mime, mime, sizeof(_mime));
-    if (!admitted) queue().entries[queue().count++] = this;
+    if (!admitted) { queue().entries[queue().count++] = this; observeDepth(); }
   }
   ~WebQueuedFileResponse() override {
+    if (_deferred && !_held && !_inner) {
+      observeWait();
+      state.heapdiag.iWebfileCancelled++;
+    }
     dequeue();
     delete _inner;  // Close the file before admitting another stream.
     release();
+    pump();
   }
   bool _sourceValid() const override { return true; }
   bool _started() const override { return _inner && _inner->_started(); }
@@ -493,13 +537,21 @@ public:
   void _respond(AsyncWebServerRequest* request) override {
     // Native RX expiry precedes response polling: leave 1s to emit the 10s 503.
     // shortcut: zero-window receive trickles can extend waits; use transport-level expiry if absolute socket lifetime must be bounded.
+    _request = request;
     if (!_held) request->client()->setRxTimeout(11);
-    start(request);
+    if (_held) start(request);
+    pump();
+    if (_state != RESPONSE_FAILED && !_held && !_inner && !_deferred) {
+      _deferred = true;
+      state.heapdiag.iWebfileQueued++;
+    }
   }
   size_t _ack(AsyncWebServerRequest* request, size_t len, uint32_t time) override {
     if (_state == RESPONSE_FAILED) return 0;
     if (_inner) return _inner->_ack(request, len, time);
-    start(request);
+    observeWait();
+    if (uint32_t(millis() - _queuedAt) >= 10000U) start(request);
+    pump();
     return 0;
   }
 };
@@ -521,11 +573,9 @@ inline void webSendFile(const char* path, const char* contentType, bool gzip) {
   // Deferred metadata must never truncate into a different path or MIME type.
   if (!path || strnlen(path, 128) >= 128) { webSendFileError(414); return; }
   if (!contentType || strnlen(contentType, 48) >= 48) { webSendFileError(400); return; }
-  if (webFileGateSafetyRefused()) {
-    webSendFileError(503);
-    return;
-  }
-  const bool admitted = !WebQueuedFileResponse::hasPending() && webFileGateTryAdmit();
+  WebQueuedFileResponse::pump();
+  const bool admitted = !WebQueuedFileResponse::hasPending() &&
+                        webFileGateCanSend(false) && webFileGateTryAdmit();
   if (!admitted && WebQueuedFileResponse::queueFull()) {
     webFileGateRejected();
     webSendFileError(503);

@@ -1,7 +1,7 @@
 /* 
 ***************************************************************************  
 **  Program  : restAPI
-**  Version  : v2.0.0-beta.72
+**  Version  : v2.0.0-beta.73
 **
 **  Copyright (c) 2021-2026 Robert van den Breemen
 **     based on Framework ESP8266 from Willem Aandewiel
@@ -77,21 +77,17 @@ static inline uint8_t restEffectiveInflightCap() {
 #define WEB_FILE_MAX_INFLIGHT 2
 #endif
 
-// ADR-188 (TASK-1162): web connection cap. Under a request storm the memory is held in
-// the lwIP send queues of connections already admitted, not in new ones, so the in-flight
-// gates above cannot stop it: the RX allocation then fails, no ACK comes in, and the
-// device goes deaf for minutes. Refuse a new request with the cheap 503 while more than
-// WEB_MAX_TX_CONNECTIONS port-80 connections hold or can queue send data. The /ws clients
-// share port 80 and are long-lived, so they are subtracted. The request being admitted is
-// one of the counted connections.
+// ADR-188: cap all possible senders, except identified idle file waiters.
+// A queued candidate reserves one sender before becoming eligible to transmit.
 #ifndef WEB_MAX_TX_CONNECTIONS
 #define WEB_MAX_TX_CONNECTIONS 4
 #endif
-static bool webConnCapExceeded() {
-  const uint16_t held = platformTcpTxHoldingOnPort(WEB_HTTP_PORT);
+static bool webConnCapExceeded(bool report = true, bool reserve = false) {
+  const uint16_t held = WebQueuedFileResponse::txHolding() + (reserve ? 1 : 0);
   const uint16_t ws   = webSocketClientCount();
   const uint16_t http = (held > ws) ? (uint16_t)(held - ws) : 0;
   if (http <= WEB_MAX_TX_CONNECTIONS) return false;
+  if (!report) return true;
   RESTDebugTf(PSTR("WEB CONN CAP: %u connections hold TX (%u ws, cap %u) => 503\r\n"),
               held, ws, (unsigned)WEB_MAX_TX_CONNECTIONS);
   state.heapdiag.iWebConn503Count++;
@@ -110,7 +106,7 @@ bool webFileGateTryAdmit() {
   if (webFileInFlight > state.heapdiag.iWebfileInflightHwm) state.heapdiag.iWebfileInflightHwm = webFileInFlight;  // TASK-1017
   return true;
 }
-bool webFileGateSafetyRefused() { return webConnCapExceeded(); }
+bool webFileGateCanSend(bool reserve) { return !webConnCapExceeded(false, reserve); }
 void webFileGateRejected() {
   RESTDebugTf(PSTR("WEBFILE BUSY: pending queue full or wait expired => 503 (freeheap=%u maxblock=%u)\r\n"),
               platformFreeHeap(), platformMaxFreeBlock());
@@ -3361,6 +3357,13 @@ void sendDeviceInfoV2()
     je.field(F("hd_max_loop_gap_ms"),      snap->st.heapdiag.iMaxLoopGapMs);
     je.field(F("hd_rest_inflight_hwm"),    (uint32_t)snap->st.heapdiag.iRestInflightHwm);
     je.field(F("hd_webfile_inflight_hwm"), (uint32_t)snap->st.heapdiag.iWebfileInflightHwm);
+    je.field(F("hd_webfile_queued"),       snap->st.heapdiag.iWebfileQueued);
+    je.field(F("hd_webfile_admitted"),     snap->st.heapdiag.iWebfileAdmitted);
+    je.field(F("hd_webfile_cancelled"),    snap->st.heapdiag.iWebfileCancelled);
+    je.field(F("hd_webfile_timeout"),      snap->st.heapdiag.iWebfileTimeout);
+    je.field(F("hd_webfile_max_wait_ms"),  snap->st.heapdiag.iWebfileMaxWaitMs);
+    je.field(F("hd_webfile_pending"),      (uint32_t)snap->st.heapdiag.iWebfilePending);
+    je.field(F("hd_webfile_pending_hwm"),  (uint32_t)snap->st.heapdiag.iWebfilePendingHwm);
     je.field(F("hd_tcp_active_pcbs"),      (uint32_t)snap->st.heapdiag.iTcpActivePcbs);
     je.field(F("hd_rest_503"),             snap->st.heapdiag.iRest503Count);
     je.field(F("hd_webfile_503"),          snap->st.heapdiag.iWebfile503Count);

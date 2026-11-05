@@ -1,7 +1,7 @@
 /* 
 ***************************************************************************  
 **  Program : FSexplorer
-**  Version  : v2.0.0-beta.72
+**  Version  : v2.0.0-beta.73
 **
 **  Mostly stolen from https://www.arduinoforum.de/User-Fips
 **  For more information visit: https://fipsok.de
@@ -140,8 +140,8 @@ static void serveProgmemAsset(const char* path, PGM_P mime, PGM_P body) {
   webSendPStream(200, mime, body);
 }
 
-// TASK-989: fonts are large immutable binaries that v2.html loads one at a time
-// through the FontFace() API. Unlike the HTML/CSS/JS shell they never change between releases,
+// TASK-1605: native font preloads and CSS share these immutable font URLs.
+// Unlike the HTML/CSS/JS shell they never change between releases,
 // so serve them with a long immutable max-age: after the first visit the browser
 // never asks again (not even a 304 probe), removing three parallel connections
 // from every page load. They previously fell through to the onNotFound catch-all

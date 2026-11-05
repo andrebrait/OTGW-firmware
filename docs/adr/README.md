@@ -491,6 +491,9 @@ Counts above are advisory rather than hand-maintained; the canonical set is the 
 
 ### Browser and Client Compatibility
 
+- **[ADR-210: Observe native asset loading and exclude bounded idle waiters from TX admission](ADR-210-observe-native-asset-loading-and-exclude-idle-waiters-from-tx-admission.md)** *(Proposed)*
+  TASK-1605 requires normal native external-asset loading with zero JavaScript retries. It adds per-navigation retry diagnostics and queue telemetry, and proposes excluding verified zero-TX waiters while preserving active-stream and TX-memory limits.
+
 - **[ADR-209: Defer bounded static-file responses so the Web UI can use a render-blocking stylesheet](ADR-209-defer-static-file-responses-for-render-blocking-stylesheets.md)** *(Proposed)*
   TASK-1604 experiments with a native external stylesheet in the document head and at most four deferred file responses. The active-stream, heap and connection limits remain unchanged; no network library is modified.
 

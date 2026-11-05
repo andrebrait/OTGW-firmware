@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 static bool failNextNothrow = false;
 void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
   if (failNextNothrow) { failNextNothrow = false; return nullptr; }
@@ -36,16 +37,40 @@ public:
   String(const __FlashStringHelper* value) : std::string(reinterpret_cast<const char*>(value)) {}
 };
 static uint32_t clockMs = 0, maxBlock = 32000;
-static uint16_t txHolding = 0, wsClients = 0;
+static uint16_t wsClients = 0;
+enum { ESTABLISHED, FIN_WAIT_1 };
+struct tcp_pcb {
+  tcp_pcb* next = nullptr;
+  uint16_t local_port = 80;
+  int state = ESTABLISHED;
+  void* callback_arg = nullptr;
+  void* unsent = nullptr;
+  void* unacked = nullptr;
+};
+static tcp_pcb* tcp_active_pcbs = nullptr;
+static bool coreLocked = false, trackClients = false;
+#define LOCK_TCPIP_CORE() do { if (coreLocked) std::abort(); coreLocked = true; } while (0)
+#define UNLOCK_TCPIP_CORE() do { if (!coreLocked) std::abort(); coreLocked = false; } while (0)
+static void linkPcb(tcp_pcb* pcb) { pcb->next = tcp_active_pcbs; tcp_active_pcbs = pcb; }
+static void unlinkPcb(tcp_pcb* pcb) {
+  for (auto** slot = &tcp_active_pcbs; *slot; slot = &(*slot)->next) {
+    if (*slot == pcb) { *slot = pcb->next; pcb->next = nullptr; return; }
+  }
+}
+static tcp_pcb blockers[6];
+static void setSenders(unsigned count) {
+  for (auto& pcb : blockers) unlinkPcb(&pcb);
+  for (unsigned i = 0; i < count; ++i) {
+    blockers[i] = {}; blockers[i].unsent = &blockers[i]; linkPcb(&blockers[i]);
+  }
+}
 uint32_t millis() { return clockMs; }
 uint32_t platformMaxFreeBlock() { return maxBlock; }
 uint32_t platformFreeHeap() { return 64000; }
-uint16_t platformTcpTxHoldingOnPort(uint16_t) { return txHolding; }
+#include "tcp_gate.inc"
 uint16_t webSocketClientCount() { return wsClients; }
-struct {
-  struct { unsigned iWebAckAbortCount = 0, iWebConn503Count = 0, iWebfile503Count = 0;
-           uint8_t iWebfileInflightHwm = 0; } heapdiag;
-} state;
+#include "heap_diag.inc"
+struct { HeapDiagSection heapdiag; } state;
 
 struct AsyncWebHeader {
   String key, val;
@@ -88,6 +113,10 @@ struct FakeFS {
   bool exists(const String& path) const { ++existsChecks; return files.count(path) != 0; }
 } LittleFS;
 struct AsyncClient {
+  tcp_pcb control;
+  AsyncClient() { control.callback_arg = this; if (trackClients) linkPcb(&control); }
+  ~AsyncClient() { unlinkPcb(&control); }
+  tcp_pcb* pcb() { return &control; }
   bool writable = true, aborted = false;
   uint32_t rxTimeout = 0, lastRx = clockMs;
   void onTimeout(std::function<void(void*, AsyncClient*, uint32_t)>, void*) {}
@@ -131,8 +160,12 @@ public:
   ~AsyncWebServerRequest() { delete response; }
   AsyncClient* client() { return &transport; }
   void onDisconnect(std::function<void()> fn) { disconnect = std::move(fn); }
-  void abort() { sent = true; transport.abort(); }
-  void cancel() { if (disconnect) { auto fn = std::move(disconnect); disconnect = nullptr; fn(); } delete response; response = nullptr; }
+  void abort() { if (!sent) { sent = true; transport.abort(); } }
+  void cancel() {
+    unlinkPcb(transport.pcb());
+    if (disconnect) { auto fn = std::move(disconnect); disconnect = nullptr; fn(); }
+    delete response; response = nullptr;
+  }
   void start() {
     if (sent) { if (transport.aborted) cancel(); return; }
     if (!response) response = beginResponse(501, "text/plain", "Handler did not handle the request");
@@ -178,6 +211,7 @@ public:
 };
 void BoundaryResponse::_respond(AsyncWebServerRequest* req) {
   req->wire.status = _code; req->wire.type = _contentType; req->wire.path = path;
+  if (trackClients) req->client()->pcb()->unacked = req->client();
   for (const auto& h : _headers) req->wire.headers[h.name()] = h.value();
   _state = RESPONSE_WAIT_ACK;
 }
@@ -192,6 +226,8 @@ WebRequestBody g_requestBody{};
 static uint8_t restInFlight = 0;
 #include "file_gate.inc"
 
+void sampleHeapWatermark() {}
+#include "reset_heap.inc"
 static int failures = 0;
 #define EXPECT(condition) do { if (!(condition)) { std::printf("FAIL %s:%d: %s\n", __func__, __LINE__, #condition); ++failures; } } while (0)
 static std::unique_ptr<AsyncWebServerRequest> sendFile(const char* path = "/asset.css", bool rest = false, bool gzip = false) {
@@ -209,7 +245,8 @@ static std::unique_ptr<AsyncWebServerRequest> sendFile(const char* path = "/asse
 static void reset() {
   EXPECT(webFileInFlight == 0); EXPECT(restInFlight == 0); EXPECT(LittleFS.openNow == 0);
   LittleFS = {}; LittleFS.files["/asset.css"] = {}; LittleFS.files["/other.css"] = {};
-  clockMs = 0; maxBlock = 32000; txHolding = wsClients = 0; state.heapdiag = {};
+  clockMs = 0; maxBlock = 32000; wsClients = 0; state.heapdiag = {};
+  setSenders(0); trackClients = false;
 }
 static void waits_then_streams_and_preserves_headers() {
   reset(); auto first = sendFile(); auto second = sendFile();
@@ -237,15 +274,14 @@ static void fifo_queue_cap_and_cancellation() {
   EXPECT(state.heapdiag.iWebfile503Count == 1);
   b->cancel(); EXPECT(restInFlight == 0); auto e = sendFile(); EXPECT(e->wire.status == 0);
   first->cancel(); e->poll(); d->poll(); c->poll(); EXPECT(c->wire.status == 0); EXPECT(e->wire.status == 0);
-  // A free active slot does not create a fifth pending place before head admission.
-  auto full = sendFile(); EXPECT(full->wire.status == 503);
-  a->poll(); EXPECT(a->wire.status == 200);
-  auto f = sendFile(); EXPECT(f->wire.status == 0);
+  // Free-slot pumping must preserve FIFO even before native polls arrive.
+  auto full = sendFile();
+  EXPECT(a->wire.status == 200); EXPECT(full->wire.status == 0);
   a->cancel(); c->poll(); EXPECT(c->wire.status == 200);
   c->cancel(); d->poll(); EXPECT(d->wire.status == 200);
   d->cancel(); e->poll(); EXPECT(e->wire.status == 200);
-  e->cancel(); f->poll(); EXPECT(f->wire.status == 200);
-  f->cancel(); second->cancel(); overflow->cancel(); full->cancel();
+  e->cancel(); full->poll(); EXPECT(full->wire.status == 200);
+  full->cancel(); second->cancel(); overflow->cancel();
 }
 static void low_memory_deadline_wrap_and_safety() {
   reset(); maxBlock = 15000; clockMs = UINT32_MAX - 5000;
@@ -256,14 +292,19 @@ static void low_memory_deadline_wrap_and_safety() {
   EXPECT(webFileInFlight == 1); EXPECT(state.heapdiag.iWebfile503Count == 1);
   auto next = sendFile(); first->cancel(); next->poll(); EXPECT(next->wire.status == 200); EXPECT(LittleFS.openHwm == 1);
   next->cancel(); wait->cancel();
-  txHolding = WEB_MAX_TX_CONNECTIONS + 1;
-  auto refused = sendFile(); EXPECT(refused->wire.status == 503); EXPECT(state.heapdiag.iWebConn503Count == 1);
+  setSenders(WEB_MAX_TX_CONNECTIONS + 1);
+  auto refused = sendFile(); EXPECT(refused->wire.status == 0);
+  for (unsigned i = 0; i < 20; ++i) refused->poll();
+  EXPECT(state.heapdiag.iWebConn503Count == 0);
+  clockMs += 10000; refused->poll(); EXPECT(refused->wire.status == 503);
   EXPECT(webFileInFlight == 0); refused->cancel();
-  txHolding = 0; auto busy = sendFile(); auto pending = sendFile();
-  txHolding = WEB_MAX_TX_CONNECTIONS + 1; pending->poll();
-  EXPECT(pending->wire.status == 503); EXPECT(state.heapdiag.iWebConn503Count == 2);
+  setSenders(0); auto busy = sendFile(); auto pending = sendFile();
+  setSenders(WEB_MAX_TX_CONNECTIONS + 1); pending->poll();
+  EXPECT(pending->wire.status == 0);
+  clockMs += 10000; pending->poll(); EXPECT(pending->wire.status == 503);
+  EXPECT(state.heapdiag.iWebConn503Count == 0);
   EXPECT(pending->wire.headers.count("ETag") == 0);
-  pending->poll(); EXPECT(state.heapdiag.iWebConn503Count == 2); pending->cancel(); busy->cancel();
+  pending->cancel(); busy->cancel();
 }
 static void errors_bounds_and_response_ownership() {
   reset(); auto missing = sendFile("/missing.css"); EXPECT(missing->wire.status == 404); missing->cancel();
@@ -341,10 +382,80 @@ static void unwritable_pending_and_null_responses() {
   EXPECT(webFileInFlight == 2); EXPECT(restInFlight == 0);
   active->cancel(); other->cancel();
 }
+static void six_native_connections_progress_without_polling() {
+  reset(); trackClients = true;
+  std::vector<std::unique_ptr<AsyncWebServerRequest>> requests;
+  for (unsigned i = 0; i < 6; ++i) requests.emplace_back(new AsyncWebServerRequest);
+  for (auto& request : requests) {
+    webBeginRequest(request.get()); webSendFile("/asset.css", F("text/css"), false); request->start();
+    EXPECT(request->wire.status != 503);
+    EXPECT(state.heapdiag.iWebfilePending <= 4);
+  }
+  EXPECT(requests[0]->wire.status == 200); EXPECT(requests[1]->wire.status == 200);
+  EXPECT(state.heapdiag.iWebfilePending == 4);
+  for (unsigned i = 0; i < 6; ++i) {
+    for (auto& request : requests) request->poll();
+    EXPECT(requests[i]->wire.status == 200);
+    for (unsigned j = i + 2; j < 6; ++j) EXPECT(requests[j]->wire.status == 0);
+    requests[i]->complete();
+  }
+  EXPECT(state.heapdiag.iWebfileInflightHwm == 2); EXPECT(LittleFS.openHwm == 2);
+  EXPECT(state.heapdiag.iWebfilePending == 0); EXPECT(state.heapdiag.iWebfilePendingHwm == 4);
+  EXPECT(state.heapdiag.iWebfile503Count == 0); EXPECT(state.heapdiag.iWebConn503Count == 0);
+}
+static void pending_identity_never_hides_tx_or_unrelated_pcbs() {
+  reset(); trackClients = true; maxBlock = 15000;
+  auto first = sendFile(); auto pending = sendFile();
+  setSenders(4);
+  EXPECT(webConnCapExceeded());
+  pending->client()->pcb()->unsent = pending.get();
+  const PlatformTcpIdleConnection excluded[] = {{pending->client()->pcb(), pending->client()}};
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 6);
+  pending->client()->pcb()->state = FIN_WAIT_1;
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 6);
+  pending->client()->pcb()->unsent = nullptr;
+  pending->client()->pcb()->unacked = pending.get();
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 6);
+  unlinkPcb(pending->client()->pcb());
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 5);
+  // Reusing an old PCB address for another sender must not subtract that sender.
+  pending->client()->pcb()->state = ESTABLISHED;
+  pending->client()->pcb()->unsent = pending->client()->pcb()->unacked = nullptr;
+  pending->client()->pcb()->callback_arg = first->client();
+  linkPcb(pending->client()->pcb());
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 6);
+  pending->client()->pcb()->callback_arg = pending->client();
+  EXPECT(platformTcpTxHoldingOnPort(80, excluded, 1) == 5);
+  pending->cancel(); first->cancel(); setSenders(0);
+}
+static void measured_queue_lifecycle_and_reset() {
+  reset(); auto first = sendFile(); auto second = sendFile();
+  EXPECT(state.heapdiag.iWebfileQueued == 0);
+  clockMs = UINT32_MAX - 50;
+  auto admitted = sendFile(); auto cancelled = sendFile(); auto timedOut = sendFile();
+  EXPECT(state.heapdiag.iWebfileQueued == 3); EXPECT(state.heapdiag.iWebfilePending == 3);
+  for (unsigned i = 0; i < 20; ++i) admitted->poll();
+  EXPECT(state.heapdiag.iWebfileQueued == 3);
+  clockMs += 100; cancelled->cancel();
+  EXPECT(state.heapdiag.iWebfileCancelled == 1); EXPECT(state.heapdiag.iWebfileMaxWaitMs == 100);
+  first->cancel(); admitted->poll(); EXPECT(admitted->wire.status == 200);
+  EXPECT(state.heapdiag.iWebfileAdmitted == 1); EXPECT(state.heapdiag.iWebfilePending == 1);
+  resetHeapWatermark();
+  EXPECT(state.heapdiag.iWebfileQueued == 0); EXPECT(state.heapdiag.iWebfileCancelled == 0);
+  EXPECT(state.heapdiag.iWebfilePending == 1); EXPECT(state.heapdiag.iWebfilePendingHwm == 1);
+  clockMs += 9900; timedOut->poll();
+  EXPECT(timedOut->wire.status == 503); EXPECT(state.heapdiag.iWebfileTimeout == 1);
+  EXPECT(state.heapdiag.iWebfilePending == 0); EXPECT(state.heapdiag.iWebfileMaxWaitMs == 10000);
+  timedOut->poll(); timedOut->cancel();
+  EXPECT(state.heapdiag.iWebfileTimeout == 1); EXPECT(state.heapdiag.iWebfileCancelled == 0);
+  admitted->cancel(); second->cancel();
+}
 int main() {
   waits_then_streams_and_preserves_headers(); fifo_queue_cap_and_cancellation();
   low_memory_deadline_wrap_and_safety(); errors_bounds_and_response_ownership(); deferred_metadata_and_file_changes(); reset();
   unwritable_pending_and_null_responses(); reset();
+  six_native_connections_progress_without_polling();
+  pending_identity_never_hides_tx_or_unrelated_pcbs(); measured_queue_lifecycle_and_reset(); reset();
   std::printf("%s: production webSendFile scheduling (%d failures)\n", failures ? "FAIL" : "PASS", failures);
   return failures ? 1 : 0;
 }

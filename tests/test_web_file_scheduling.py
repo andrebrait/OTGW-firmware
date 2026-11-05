@@ -37,6 +37,18 @@ def main():
         legacy = "bool g_fileSlotHeld = false;\n" if "g_fileSlotHeld" in header else ""
         (directory / "file_gate.inc").write_text(legacy + gate[start:end])
         (directory / "webServerCompat.h").write_text(header)
+        platform = source("src/libraries/Platform/src/platform_esp32.h", args.old_rev)
+        start = platform.index("struct PlatformTcpIdleConnection {") if "struct PlatformTcpIdleConnection {" in platform else platform.index("inline uint16_t platformTcpTxHoldingOnPort(")
+        end = platform.index("// Exception cause", start)
+        (directory / "tcp_gate.inc").write_text(platform[start:end])
+        model = source("src/OTGW-firmware/OTGW-firmware.h", args.old_rev)
+        start = model.index("struct HeapDiagSection {")
+        end = model.index("\n};", start) + 3
+        (directory / "heap_diag.inc").write_text(model[start:end])
+        helpers = source("src/OTGW-firmware/helperStuff.ino", args.old_rev)
+        start = helpers.index("void resetHeapWatermark() {")
+        end = helpers.index("\n}", start) + 2
+        (directory / "reset_heap.inc").write_text(helpers[start:end])
         (directory / "Arduino.h").write_text("")
         (directory / "ESPAsyncWebServer.h").write_text("")
         executable = directory / "file-scheduling"

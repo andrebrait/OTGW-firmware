@@ -5,11 +5,13 @@ status: In Progress
 assignee:
   - '@andrebrait'
 created_date: '2026-11-05T13:12:00Z'
-updated_date: '2026-11-05T13:14:00Z'
+updated_date: '2026-11-05T13:16:00Z'
 labels:
   - webui
   - web-server
 dependencies: []
+references:
+  - https://github.com/rvdbreemen/OTGW-firmware/pull/697
 ordinal: 781000
 ---
 

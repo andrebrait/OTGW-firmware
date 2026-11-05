@@ -74,6 +74,18 @@ Before any production recommendation, measure cold and warm page loads, concurre
 
 Initial local evidence: the production-path host regression fails before scheduling and passes afterward, including address/undefined-behavior sanitizer runs and the existing request-body cleanup cases. A deadline-condition mutation is detected. Delayed, normal, initial-503 recovery and terminal-failure browser probes pass in Chrome, Firefox and Playwright WebKit. These checks do not replace the on-device verification above or constitute branded Safari certification.
 
+### OTGW2 field experiment, 2026-11-05
+
+The user approved installing `2.0.0-beta.72+895b46c` on the ESP32-S3 Combo at `10.0.254.112`. The app and filesystem include the hook, MQTT naming and connection-animation fixes. OTA verified the filesystem hash and complete JavaScript asset; all 175 exposed settings were unchanged, and MQTT, boiler and thermostat reconnected.
+
+- Parallel downloads at offered concurrency two, three and four all returned 200, with complete contents matching the staged assets. The active-file high-water mark remained two.
+- One six-connection burst returned six 503 responses from the unchanged connection cap, each with `Retry-After: 1`. This is a remaining limit, not evidence that arbitrary native parallel loading is safe. Keep the script/font serialization and bounded retry fallback.
+- Cancelling a queued stylesheet behind two deliberately slow streams was followed by three successful parallel downloads. No reboot or loss of MQTT/OpenTherm connectivity was observed.
+- After the direct HTTP probes, free heap recovered to its 57,204-byte baseline and largest free block to 31,732 bytes, with no low/warning/critical entries or MQTT/WS drops. Across the subsequent browser checks, recorded minima were 20,204 bytes free heap and 11,252 bytes largest block. The final nine-minute snapshot had 56,392 bytes free heap and a 31,732-byte largest block, with all integrations connected.
+- Live Chrome first paint followed the stylesheet response on two cold loads (CSS end / first contentful paint: 543 / 572 ms and 527 / 556 ms) and one warm load (422 / 452 ms). Each fetched the stylesheet once; no failing resources or JavaScript exceptions were observed. This visual/timing check used a transparent SSH TCP tunnel through the Docker host because automated Chrome could not reach the device directly from this Mac.
+
+This is short-run evidence on one Combo unit, not a sustained request-storm or multi-board qualification. The proposal remains Proposed.
+
 ## Related Decisions
 
 ADR-139 keeps assets on LittleFS with cache validation. ADR-147 and ADR-165 govern active file-serving memory and parallelism. ADR-188 remains the connection-safety contract. No accepted ADR body is changed by this proposal.

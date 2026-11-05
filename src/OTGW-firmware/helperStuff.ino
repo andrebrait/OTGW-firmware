@@ -555,6 +555,12 @@ void resetHeapWatermark() {
   // TASK-1017 load-test instrumentation:
   state.heapdiag.iRestInflightHwm          = 0;
   state.heapdiag.iWebfileInflightHwm       = 0;
+  state.heapdiag.iWebfileQueued            = 0;
+  state.heapdiag.iWebfileAdmitted          = 0;
+  state.heapdiag.iWebfileCancelled         = 0;
+  state.heapdiag.iWebfileTimeout           = 0;
+  state.heapdiag.iWebfileMaxWaitMs         = 0;
+  state.heapdiag.iWebfilePendingHwm        = state.heapdiag.iWebfilePending;
   state.heapdiag.iRest503Count             = 0;
   state.heapdiag.iWebfile503Count          = 0;
   state.heapdiag.iWebConn503Count          = 0;

@@ -528,6 +528,8 @@ void sampleHeapWatermark() {
   state.heapdiag.aMaxBlockBucket[b]++;
   // TASK-1017: lwIP active TCP PCB count, loop-task-only (see platformTcpActivePcbCount).
   state.heapdiag.iTcpActivePcbs = platformTcpActivePcbCount();
+  if (state.heapdiag.iTcpActivePcbs > state.heapdiag.iExpPcbHwm) state.heapdiag.iExpPcbHwm = state.heapdiag.iTcpActivePcbs;
+  webNoteHeap(0);
 }
 
 // Zero the soak window: watermark, histogram, and the cumulative pressure counters,
@@ -566,6 +568,12 @@ void resetHeapWatermark() {
   state.heapdiag.iWebConn503Count          = 0;
   state.heapdiag.iWebAckAbortCount         = 0;
   state.heapdiag.iTcpActivePcbs            = 0;
+  state.heapdiag.iExpMinFree               = 0xFFFFFFFF;
+  state.heapdiag.iExpPcbHwm                = 0;
+  state.heapdiag.iExpMinFreeAt             = 0;
+  state.heapdiag.iExpMinBlockAt            = 0;
+  heap_caps_monitor_local_minimum_free_size_stop();   // EXPERIMENT: restart the allocator's own minimum
+  heap_caps_monitor_local_minimum_free_size_start();
   sampleHeapWatermark();   // re-seed iMinMaxBlock + first histogram tick (no 0xFFFFFFFF window) + tcp pcb count
 }
 

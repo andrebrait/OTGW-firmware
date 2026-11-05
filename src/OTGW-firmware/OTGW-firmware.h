@@ -525,6 +525,10 @@ struct HeapDiagSection {                 // state.heapdiag — cumulative heap-p
   uint32_t iWebConn503Count        = 0; // 503s from the web connection cap (restAPI.ino webConnCapExceeded, ADR-188)
   uint32_t iWebAckAbortCount       = 0; // web connections aborted on the ack timeout (webServerCompat.h webBeginRequest, ADR-189)
   uint16_t iTcpActivePcbs          = 0; // lwIP active TCP PCB count, sampled 1 Hz from the loop task (platformTcpActivePcbCount)
+  uint32_t iExpMinFree             = 0xFFFFFFFF; // EXPERIMENT: resettable free-heap minimum at web events
+  uint16_t iExpPcbHwm              = 0;          // EXPERIMENT: active PCB high-water mark (1 Hz)
+  uint32_t iExpMinFreeAt           = 0;          // EXPERIMENT: event id at the free-heap minimum
+  uint32_t iExpMinBlockAt          = 0;          // EXPERIMENT: event id at the block minimum
 };
 
 enum RestPerfTarget : uint8_t {

@@ -372,6 +372,11 @@ inline void webSendPStream(int code, PGM_P contentType, PGM_P body) {
 bool webFileGateTryAdmit();
 void webFileGateRelease();
 bool webFileGateCanSend(bool reserve);
+// EXPERIMENT (heap dip): runtime knobs set from telnet, and an event-time heap sampler.
+extern uint8_t g_expPendingCap;
+extern bool g_expCountWaiters;
+extern uint8_t g_expFileCap;
+void webNoteHeap(uint8_t eventId);
 void webFileGateRejected();
 
 // ESPAsyncWebServer keeps ONE disconnect callback per request. Keep body cleanup
@@ -403,7 +408,7 @@ inline AsyncWebServerResponse* webFileErrorResponse(AsyncWebServerRequest* reque
 // ESPAsyncWebServer polls _ack on async_tcp and deletes this with its request.
 class WebQueuedFileResponse : public AsyncWebServerResponse {
   struct Queue {
-    WebQueuedFileResponse* entries[4];
+    WebQueuedFileResponse* entries[6];
     uint8_t count;
     bool pumping;
   };
@@ -487,26 +492,27 @@ class WebQueuedFileResponse : public AsyncWebServerResponse {
     _code = _inner->code();
     request->client()->setRxTimeout(0);
     _inner->_respond(request);
+    webNoteHeap(2);
   }
 
 public:
   static bool hasPending() { return queue().count != 0; }
-  static bool queueFull() { return queue().count == 4; }
+  static bool queueFull() { return queue().count >= g_expPendingCap; }
   static uint16_t txHolding() {
-    PlatformTcpIdleConnection idle[4];
+    PlatformTcpIdleConnection idle[6];
     uint8_t count = 0;
     for (uint8_t i = 0; i < queue().count; ++i) {
       AsyncWebServerRequest* request = queue().entries[i]->_request;
       if (!request || !request->client()) continue;
       idle[count++] = {request->client()->pcb(), request->client()};
     }
-    return platformTcpTxHoldingOnPort(WEB_HTTP_PORT, idle, count);
+    return platformTcpTxHoldingOnPort(WEB_HTTP_PORT, idle, g_expCountWaiters ? 0 : count);
   }
   static void pump() {
     Queue& pending = queue();
     if (pending.pumping) return;
     pending.pumping = true;
-    for (uint8_t i = 0; i < 4 && pending.count; ++i) {
+    for (uint8_t i = 0; i < 6 && pending.count; ++i) {
       WebQueuedFileResponse* head = pending.entries[0];
       if (!head->_request || !head->_request->client()->canSend()) break;
       head->start(head->_request);
@@ -544,11 +550,12 @@ public:
     if (_state != RESPONSE_FAILED && !_held && !_inner && !_deferred) {
       _deferred = true;
       state.heapdiag.iWebfileQueued++;
+      webNoteHeap(5);
     }
   }
   size_t _ack(AsyncWebServerRequest* request, size_t len, uint32_t time) override {
     if (_state == RESPONSE_FAILED) return 0;
-    if (_inner) return _inner->_ack(request, len, time);
+    if (_inner) { size_t sent = _inner->_ack(request, len, time); webNoteHeap(3); return sent; }
     observeWait();
     if (uint32_t(millis() - _queuedAt) >= 10000U) start(request);
     pump();
@@ -592,6 +599,7 @@ inline void webSendFile(const char* path, const char* contentType, bool gzip) {
   }
   webApplyHeaders(response);
   currentRequest->send(response);
+  webNoteHeap(1);
   g_responseSent = true;
 }
 inline void webSendFile(const char* path, const __FlashStringHelper* contentType, bool gzip) {

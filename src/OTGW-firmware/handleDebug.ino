@@ -461,6 +461,18 @@ void handleDebugChar(char c){
                 resetHeapWatermark();
                 DebugTln(F("Heap soak diagnostics reset (watermark + histogram + pressure counters; min_free_heap is native, not reset). Use from a healthy heap for accurate tier counts."));
                 break;
+            case 'K':  // EXPERIMENT: cycle the pending-queue cap 4 -> 5 -> 6 -> 0 -> 1 -> 2 -> 3 -> 4
+                g_expPendingCap = (uint8_t)((g_expPendingCap + 1) % 7);
+                DebugTf(PSTR("EXP pending cap = %u\r\n"), g_expPendingCap);
+                break;
+            case 'L':  // EXPERIMENT: toggle the active file-stream cap between 1 and 2
+                g_expFileCap = (g_expFileCap == 1) ? 2 : 1;
+                DebugTf(PSTR("EXP file cap = %u\r\n"), g_expFileCap);
+                break;
+            case 'C':  // EXPERIMENT: count queued waiters as senders again (ADR-188 original accounting)
+                g_expCountWaiters = !g_expCountWaiters;
+                DebugTf(PSTR("EXP count waiters = %u\r\n"), g_expCountWaiters ? 1 : 0);
+                break;
             default:
                 break;
         }

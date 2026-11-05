@@ -95,12 +95,13 @@ static bool webConnCapExceeded(bool report = true, bool reserve = false) {
 }
 
 static uint8_t webFileInFlight = 0;
+uint8_t g_expFileCap = WEB_FILE_MAX_INFLIGHT;
 // Silent: a pending response may retry admission on every native response poll.
 bool webFileGateTryAdmit() {
-  uint8_t cap = WEB_FILE_MAX_INFLIGHT;
+  uint8_t cap = g_expFileCap;
   const uint32_t mb = platformMaxFreeBlock();
   if (mb < 16000)      cap = 1;
-  else if (mb < 24000) cap = 2;
+  else if (mb < 24000 && cap > 2) cap = 2;
   if (webFileInFlight >= cap) return false;
   webFileInFlight++;
   if (webFileInFlight > state.heapdiag.iWebfileInflightHwm) state.heapdiag.iWebfileInflightHwm = webFileInFlight;  // TASK-1017
@@ -113,7 +114,19 @@ void webFileGateRejected() {
   state.heapdiag.iWebfile503Count++;
 }
 void webFileGateRelease() { if (webFileInFlight) webFileInFlight--; }
-void restSlotRelease()    { if (restInFlight) restInFlight--; }
+void restSlotRelease()    { webNoteHeap(6); if (restInFlight) restInFlight--; }
+// EXPERIMENT (heap dip): knobs and an event-time sampler. The context word packs
+// event | file streams << 4 | pending << 8 | REST in flight << 12 | active PCBs << 16.
+uint8_t g_expPendingCap = 4;
+bool g_expCountWaiters = false;
+void webNoteHeap(uint8_t eventId) {
+  const uint32_t mb = platformMaxFreeBlock();
+  const uint32_t fh = platformFreeHeap();
+  const uint32_t ctx = eventId | (uint32_t(webFileInFlight) << 4) | (uint32_t(state.heapdiag.iWebfilePending) << 8) |
+                       (uint32_t(restInFlight) << 12) | (uint32_t(state.heapdiag.iTcpActivePcbs) << 16);
+  if (mb < state.heapdiag.iMinMaxBlock) { state.heapdiag.iMinMaxBlock = mb; state.heapdiag.iExpMinBlockAt = ctx; }
+  if (fh < state.heapdiag.iExpMinFree) { state.heapdiag.iExpMinFree = fh; state.heapdiag.iExpMinFreeAt = ctx; }
+}
 
 // Zero-allocation HTTP method to string (returns PROGMEM pointer).
 // Replaced an older helper that returned String, i.e. a heap allocation per
@@ -2795,6 +2808,7 @@ void processAPI(AsyncWebServerRequest *request)
 {
   // TASK-1450: first, before the 503 gates: a request that gets a busy reply still crossed the LAN.
   g_lastRestRequestMs = millis();
+  webNoteHeap(4);
 
   // Bind the per-request context. processAPI is reached from the /api route AND
   // the onNotFound catch-all (which already bound it); rebinding is idempotent.
@@ -3427,6 +3441,13 @@ void sendDeviceInfoV2()
     je.field(F("hd_webfile_max_wait_ms"),  snap->st.heapdiag.iWebfileMaxWaitMs);
     je.field(F("hd_webfile_pending"),      (uint32_t)snap->st.heapdiag.iWebfilePending);
     je.field(F("hd_webfile_pending_hwm"),  (uint32_t)snap->st.heapdiag.iWebfilePendingHwm);
+    je.field(F("hd_exp_min_free"),         snap->st.heapdiag.iExpMinFree);
+    je.field(F("hd_exp_min_free_at"),      snap->st.heapdiag.iExpMinFreeAt);
+    je.field(F("hd_exp_min_block_at"),     snap->st.heapdiag.iExpMinBlockAt);
+    je.field(F("hd_exp_pcb_hwm"),          (uint32_t)snap->st.heapdiag.iExpPcbHwm);
+    je.field(F("hd_exp_pending_cap"),      (uint32_t)g_expPendingCap);
+    je.field(F("hd_exp_count_waiters"),    (uint32_t)(g_expCountWaiters ? 1 : 0));
+    je.field(F("hd_exp_file_cap"),         (uint32_t)g_expFileCap);
     je.field(F("hd_tcp_active_pcbs"),      (uint32_t)snap->st.heapdiag.iTcpActivePcbs);
     je.field(F("hd_rest_503"),             snap->st.heapdiag.iRest503Count);
     je.field(F("hd_webfile_503"),          snap->st.heapdiag.iWebfile503Count);

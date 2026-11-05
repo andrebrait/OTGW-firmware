@@ -1,7 +1,7 @@
 /* 
 ***************************************************************************  
 **  Program : FSexplorer
-**  Version  : v2.0.0-beta.71
+**  Version  : v2.0.0-beta.72
 **
 **  Mostly stolen from https://www.arduinoforum.de/User-Fips
 **  For more information visit: https://fipsok.de
@@ -204,7 +204,10 @@ void startWebserver(){
   server.on("/",           HTTP_GET, sendIndex);
   server.on("/index",      HTTP_GET, sendIndex);
   server.on("/index.html", HTTP_GET, sendIndex);
-  server.serveStatic("/FSexplorer.png", LittleFS, "/FSexplorer.png");
+  server.on("/FSexplorer.png", HTTP_GET, [](AsyncWebServerRequest *r) {
+    webBeginRequest(r);
+    webSendFile("/FSexplorer.png", F("image/png"), /*gzip=*/false);
+  });
 
   // ETag + bounded max-age caching for every static webui asset (ADR-139). Plain
   // readable files served from flash via AsyncFileResponse; no gzip, no ?v= query.

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Compile the real webSendFile path and file gate behind bounded platform fakes.
+
+Run: python3 tests/test_web_file_scheduling.py
+The original header/gate can be compared with --old-rev <revision>.
+Only Arduino, LittleFS and ESPAsyncWebServer's transport boundary are faked.
+"""
+import argparse
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def source(path, rev):
+    if rev:
+        return subprocess.check_output(["git", "show", f"{rev}:{path}"], cwd=ROOT, text=True)
+    return (ROOT / path).read_text()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--old-rev")
+    args = parser.parse_args()
+    compiler = shutil.which("clang++") or shutil.which("g++")
+    if not compiler:
+        raise SystemExit("A host C++ compiler is required")
+    with tempfile.TemporaryDirectory(prefix="otgw-file-scheduling-") as tmp:
+        directory = Path(tmp)
+        gate = source("src/OTGW-firmware/restAPI.ino", args.old_rev)
+        # Compile the complete production gate block, not a copied implementation.
+        start = gate.index("#ifndef WEB_FILE_MAX_INFLIGHT")
+        end = gate.index("// Zero-allocation HTTP method", start)
+        header = source("src/OTGW-firmware/webServerCompat.h", args.old_rev)
+        legacy = "bool g_fileSlotHeld = false;\n" if "g_fileSlotHeld" in header else ""
+        (directory / "file_gate.inc").write_text(legacy + gate[start:end])
+        (directory / "webServerCompat.h").write_text(header)
+        (directory / "Arduino.h").write_text("")
+        (directory / "ESPAsyncWebServer.h").write_text("")
+        executable = directory / "file-scheduling"
+        subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                        "-I", str(directory), "-I", str(ROOT / "src/OTGW-firmware"),
+                        str(ROOT / "tests/fixtures/web_file_scheduling.cpp"), "-o", str(executable)], check=True)
+        return subprocess.run([str(executable)]).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

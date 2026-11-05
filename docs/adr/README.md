@@ -491,6 +491,9 @@ Counts above are advisory rather than hand-maintained; the canonical set is the 
 
 ### Browser and Client Compatibility
 
+- **[ADR-209: Defer bounded static-file responses so the Web UI can use a render-blocking stylesheet](ADR-209-defer-static-file-responses-for-render-blocking-stylesheets.md)** *(Proposed)*
+  TASK-1604 experiments with a native external stylesheet in the document head and at most four deferred file responses. The active-stream, heap and connection limits remain unchanged; no network library is modified.
+
 - **[ADR-025: Safari WebSocket Connection Management During Firmware Upload](ADR-025-safari-websocket-connection-management.md)**  
   Proactively closing WebSocket before firmware upload to prevent Safari's connection pool exhaustion from dropping it mid-transfer.
 

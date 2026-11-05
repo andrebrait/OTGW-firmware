@@ -16,33 +16,39 @@
     }catch(e){}
   })();
 </script>
+<link id="v2Stylesheet" rel="stylesheet" href="v2-bundle.css" onload="this.dataset.loadState='loaded'" onerror="this.dataset.loadState='failed'">
 <script>
-  // TASK-978: load the stylesheets + v2.js with retry-on-503. A 503'd/reset
-  // <link>/<script> has no native retry, so the UI would render unstyled (CSS
-  // dropped) or dead (v2.js dropped) with nothing surfaced. Retry with linear
-  // backoff, as the former classic UI loader did (TASK-960).
-  // TASK-989: load SEQUENTIALLY (v2-bundle.css -> v2.js), one connection at a
-  // time. A parallel burst of asset connections is what collapses the S3 heap
-  // under concurrent serving (AsyncTCP accepts unconditionally; measured
-  // freeheap 22K->3.8K); serializing the assets removes the burst at the
-  // source instead of relying on the serve gates to shed it. v2-bundle.css is
-  // ds-tokens.css + v2.css concatenated at build time (build.py,
-  // generate_v2_css_bundle) -- one request instead of two on first paint.
+  // The parser-discovered stylesheet blocks first paint. Retry only a genuine
+  // failure, then load v2.js and fonts sequentially to bound asset concurrency.
   (function(){
     var MAX = 8;
+    function failed(asset){
+      console.error('[loader] gave up on ' + asset);
+      function showError(){
+        var error = document.createElement('p');
+        error.setAttribute('role', 'alert');
+        error.textContent = 'Unable to load ' + asset + '. Reload this page to retry.';
+        document.body.insertBefore(error, document.body.firstChild);
+      }
+      if (document.body) showError();
+      else document.addEventListener('DOMContentLoaded', showError);
+    }
     function loadCss(href, then){
       var attempt = 0;
-      (function go(){
-        var l = document.createElement('link');
-        l.rel = 'stylesheet'; l.href = href;
-        l.onload = function(){ if (then) then(); };
-        l.onerror = function(){
-          if (l.parentNode) l.parentNode.removeChild(l);
-          if (++attempt <= MAX) setTimeout(go, 200 * attempt);
-          else { console.error('[loader] gave up on ' + href); if (then) then(); }
-        };
-        document.head.appendChild(l);
-      })();
+      function retry(){
+        if (++attempt > MAX) { failed(href); return; }
+        setTimeout(function(){
+          var l = document.createElement('link');
+          l.rel = 'stylesheet'; l.href = href;
+          l.onload = function(){ if (then) then(); };
+          l.onerror = function(){
+            if (l.parentNode) l.parentNode.removeChild(l);
+            retry();
+          };
+          document.head.appendChild(l);
+        }, 200 * attempt);
+      }
+      retry();
     }
     function loadJs(then){
       var jsAttempt = 0;
@@ -53,21 +59,30 @@
         s.onerror = function(){
           if (s.parentNode) s.parentNode.removeChild(s);
           if (++jsAttempt <= MAX) setTimeout(go, 200 * jsAttempt);
-          else { console.error('[loader] gave up on v2.js'); if (then) then(); }
+          else failed('v2.js');
         };
         document.head.appendChild(s);
       })();
     }
-    // v2-bundle.css -> v2.js -> fonts, STRICTLY chained (each step's "then" only
-    // fires after the previous one lands). loadCss()/loadJs() return immediately
-    // (they fire-and-continue via callback, not a blocking call) -- starting the
-    // font loader right after calling loadCss(), rather than inside its "then",
-    // was the bug that let font1 race the still-in-flight v2-bundle.css fetch
-    // (plus the browser's own automatic favicon.ico fetch) for the same
-    // WEB_FILE_MAX_INFLIGHT=2 slots, 503ing repeatedly even one-font-at-a-time.
-    loadCss('v2-bundle.css', function(){
+    // Record the native outcome even if its event precedes this script;
+    // a failed HTTP response can still leave a non-null sheet in Chrome.
+    var initialCss = document.getElementById('v2Stylesheet'), cssSettled = false;
+    if (!initialCss) { failed('v2-bundle.css'); return; }
+    function startUi(){
       loadJs(function(){ loadFontsSequentially(); });
-    });
+    }
+    function cssReady(ok){
+      if (cssSettled) return;
+      cssSettled = true;
+      if (ok) startUi();
+      else {
+        if (initialCss.parentNode) initialCss.parentNode.removeChild(initialCss);
+        loadCss('v2-bundle.css', startUi);
+      }
+    }
+    initialCss.addEventListener('load', function(){ cssReady(true); });
+    initialCss.addEventListener('error', function(){ cssReady(false); });
+    if (initialCss.dataset.loadState) cssReady(initialCss.dataset.loadState === 'loaded');
 
     // Field bug (esp32-otgw32, 2026-07-06): the 3 self-hosted fonts used to ship
     // as @font-face rules inside v2-bundle.css. The browser fetches every

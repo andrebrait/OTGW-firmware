@@ -83,7 +83,7 @@ const char Header[] PROGMEM = "HTTP/1.1 303 OK\r\nLocation:FSexplorer.html\r\nCa
 // stored as plain readable files on LittleFS (no build-time gzip, maintainer
 // directive); streamed straight from flash via AsyncFileResponse, never buffered
 // whole on the fragmented S3 heap.
-static void serveVersionedAsset(const char* path, const __FlashStringHelper* mime) {
+static void serveVersionedAsset(const char* path, const __FlashStringHelper* mime, bool gzip = false) {
   // Existence first, before any ETag / max-age is staged and before the 304
   // short-circuit. A missing asset must NOT be cached: the ETag is the filesystem
   // hash, which only changes on a reflash, so a 404 tagged with it (or answered
@@ -115,7 +115,7 @@ static void serveVersionedAsset(const char* path, const __FlashStringHelper* mim
     webPushHeader(F("ETag"), etag);
   }
   webPushHeader(F("Cache-Control"), F("no-cache"));
-  webSendFile(path, mime, /*gzip=*/false);
+  webSendFile(path, mime, gzip);
 }
 
 // TASK-1294: static text that lives in the firmware image instead of on LittleFS, so
@@ -170,6 +170,11 @@ static void sendIndex(AsyncWebServerRequest *request) {
   // TASK-1223.12: v2 is the only Web UI; the classic shell (index.html) is gone.
   // Checked per request, not at boot: when v2.html is deleted or lost at runtime
   // the root still lands on FSexplorer, the page to upload a working copy with.
+  // Single-page experiment: v2.html with CSS, JS and fonts inlined, gzipped at build time.
+  if (LittleFS.exists("/v2.html.gz")) {
+    serveVersionedAsset("/v2.html.gz", F("text/html; charset=UTF-8"), /*gzip=*/true);
+    return;
+  }
   if (!LittleFS.exists("/v2.html")) {
     webSendFile("/FSexplorer.html", F("text/html; charset=UTF-8"), /*gzip=*/false);
     return;

@@ -63,6 +63,21 @@ Console events `asset_retry`, `asset_recovered`, `asset_failed` and `asset_load_
 
 Existing REST device-info and telnet diagnostics expose queue totals for deferred/admitted/cancelled/timed-out requests, maximum wait milliseconds, current pending depth and pending high-water mark. They are bounded integer fields and do not control admission. Resetting diagnostics must not reset or corrupt live queue state. Existing file/connection refusal counters remain available. No new MQTT topics are added.
 
+### Operational Check
+
+Inspect `window.otgwAssetLoad` in the browser console, or use `console.table(window.otgwAssetLoad.assets)`. A clean result requires `complete: true`, `cleanFirstAttempt: true`, `retryCount: 0`, `failureCount: 0` and one loaded attempt for every critical asset. Filter console output by `asset_retry`, `asset_recovered`, `asset_failed` or `asset_load_summary`; `pageId` separates preserved logs from different navigations.
+
+The device-info fields are `hd_webfile_queued`, `hd_webfile_admitted`, `hd_webfile_cancelled`, `hd_webfile_timeout`, `hd_webfile_max_wait_ms`, `hd_webfile_pending` and `hd_webfile_pending_hwm`. Totals are since boot or diagnostic reset, not per browser navigation. An admission is permission to start serving, not a claim that the client received the complete file.
+
+Run the independent probe against the device origin, or an already-open transparent TCP tunnel:
+
+```sh
+uv run --with playwright python scripts/tests/asset_loading.py \
+  --base-url http://10.0.254.112 --browser all --rounds 3
+```
+
+The probe uses installed Chrome and Playwright Firefox/WebKit. It emits JSON and exits nonzero on any acceptance failure. Some headless engines do not fetch browser-chrome favicons, so their favicon endpoint is checked once after the native critical assets; this is explicitly separate from the five-asset controller. WebKit coverage is not branded Safari certification.
+
 ## Alternatives Considered
 
 - **Keep serialized startup and call successful recovery a pass.** Rejected: hides ordinary asset refusals and does not meet the acceptance criterion.
@@ -81,6 +96,21 @@ This does not guarantee unlimited clients or absolute socket lifetime against a 
 The host regression compiles production file serving, gate accounting, platform PCB walking, diagnostic state and reset code. It must demonstrate six pre-existing live asset sockets progressing without 503, FIFO/cap bounds, correct sender reservation, and no exclusion of TX-bearing, closing or reused PCB entries. Preserve cancellation, allocation failure, timer rollover, error caching and native pre-/post-send abort regressions.
 
 Browser regressions exercise clean native requests, cached/reload state reset, genuine CSS/script/font failures, recovery, exhaustion and incomplete loads. The independent `scripts/tests/asset_loading.py` probe observes requests/statuses and the page record; it rejects managed mode, retries, failed attempts, duplicate critical-asset requests and missing response evidence even when the page claims success. Cold and warm checks must pass on the real device with settings, integrations and memory safety preserved. Local success alone is not field acceptance.
+
+### OTGW2 Field Evidence, 2026-11-05
+
+Installed `2.0.0-beta.73+e62c403` on the Combo unit with the earlier fixes preserved. OTA confirmed the filesystem hash and complete JavaScript file. All 175 exposed settings were unchanged, and MQTT, boiler and thermostat reconnected.
+
+- Eighteen native loads passed: three cold/warm pairs each in Chrome, Firefox and WebKit. All five critical assets had one attempt, no retries and no failed attempts. Independent network observations and console summaries agreed. Sixteen recorded first-contentful-paint samples followed CSS completion; two samples had no paint timing available.
+- A separate six-socket download burst returned 200 for every asset, with contents matching the staged files. File-stream high-water mark remained two, pending high-water mark four, and no new file/connection refusals or admission timeouts occurred in that burst.
+- A deliberately bounded eight-socket overload produced four 503 responses with `Retry-After: 1`. Cancelling a pending stylesheet was recorded once; a following six-socket burst again returned all 200. The queue drained to zero and integrations stayed connected.
+- Browser interception injected one initial 503 for CSS, JavaScript and a font in separate cases, without modifying device files. All recovered and emitted retry/recovery/summary events; the summaries stayed non-clean and the independent evaluator rejected them. CSS and script each recorded one retry; the font case recorded two failed attempts/retries before successful recovery. The cause of the second font load error was not captured, and no additional server 503 counter increment was observed in that phase. All three font faces were usable afterward.
+- Final counters were 93 queued, 92 admitted, one cancelled, zero timed out and zero pending; maximum observed wait was 3,410 ms. The four file refusals were the deliberate overload. One REST connection-cap refusal was observed in the broader test traffic: the asset-only result must not be represented as proof that all API requests are retry-free.
+- The final 21-minute snapshot had 57,012 bytes free heap and a 31,732-byte largest block. Recorded minima were 16,212 bytes free heap and 8,692 bytes largest block; low/warning/critical entries and MQTT/WS drops were zero. No reboot was observed.
+
+The app image is 2,144,992 bytes, 1,184 bytes larger than the preceding build, leaving about 145.3 KiB in the app partition (93.5% utilization). The filesystem still satisfies the 656 KiB minimum-image plus 96 KiB runtime-reserve budget within its 768 KiB partition.
+
+This is finite, short-run evidence on one unit, not a long soak or universal guarantee. The proposal remains Proposed. Full-suite limitations remain the unrelated settings-help byte-budget assertion and Windows-only test-toolchain requirement.
 
 ## Related Decisions
 
